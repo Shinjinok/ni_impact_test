@@ -12,6 +12,16 @@ physical_channel_hammer = "cDAQ1Mod4/ai1"
 sample_rate = 25600
 chunk_size = 1024
 threshold = 10.0  # 단위가 Newton으로 바뀌었으므로 임계값 상향 조정 필요
+simulation = False  # 시뮬레이션 모드 여부
+
+# 키보드 트리거 플래그
+trigger_flag = False
+
+def on_key_press(event):
+    """키보드 이벤트 핸들러 - 'p' 키 감지"""
+    global trigger_flag
+    if event.key == 'p':
+        trigger_flag = True
 
 def calculate_fft(signal, sample_rate):
     N = len(signal)
@@ -23,19 +33,24 @@ def calculate_fft(signal, sample_rate):
     return xf, magnitude
 
 def continuous_acquisition():
-    
+    global trigger_flag
     with nidaqmx.Task() as task:
-        # 가속도계 (5mV/g -> 5.0)
-        task.ai_channels.add_ai_accel_chan(physical_channel, units=nidaqmx.constants.AccelUnits.G,
-                                          sensitivity=5.0, current_excit_source=ExcitationSource.INTERNAL,
-                                          current_excit_val=0.004)
-        # 해머 (2.2mV/N -> 2.2)
-        task.ai_channels.add_ai_force_iepe_chan(physical_channel_hammer, units=nidaqmx.constants.ForceUnits.NEWTONS,
-                                               sensitivity=2.2, current_excit_source=ExcitationSource.INTERNAL,
-                                               current_excit_val=0.004)
+        try:
+            # 가속도계 (5mV/g -> 5.0)
+            task.ai_channels.add_ai_accel_chan(physical_channel, units=nidaqmx.constants.AccelUnits.G,
+                                            sensitivity=5.0, current_excit_source=ExcitationSource.INTERNAL,
+                                            current_excit_val=0.004)
+            # 해머 (2.2mV/N -> 2.2)
+            task.ai_channels.add_ai_force_iepe_chan(physical_channel_hammer, units=nidaqmx.constants.ForceUnits.NEWTONS,
+                                                sensitivity=2.2, current_excit_source=ExcitationSource.INTERNAL,
+                                                current_excit_val=0.004)
 
-        task.timing.cfg_samp_clk_timing(rate=sample_rate, samps_per_chan=chunk_size,
-                                        sample_mode=AcquisitionType.CONTINUOUS)
+            task.timing.cfg_samp_clk_timing(rate=sample_rate, samps_per_chan=chunk_size,
+                                            sample_mode=AcquisitionType.CONTINUOUS)
+        except Exception as e:
+            simulation = True
+            print("Hardware configuration failed. Switching to simulation mode.")
+            
 
         pre_samples = int(sample_rate * 10 / 1000.0)
         post_samples = int(sample_rate * 990 / 1000.0)
@@ -53,10 +68,24 @@ def continuous_acquisition():
 
         print(">>> Ready for first impact! Waiting for trigger...")
 
+        # 키보드 이벤트 핸들러 연결
+        fig.canvas.mpl_connect('key_press_event', on_key_press)
+
+        print(">>> Ready for first impact! Press 'p' to trigger capture...")
+
         try:
             while True:
+                # matplotlib 이벤트 처리
+                fig.canvas.flush_events()
+                
                 # 데이터 수집 모드
-                data = task.read(number_of_samples_per_channel=chunk_size)
+                if not simulation:
+                    data = task.read(number_of_samples_per_channel=chunk_size)
+                else:
+                    # 시뮬레이션 모드에서는 임의의 데이터 생성
+                    data = [np.random.normal(0, 1, chunk_size), np.random.normal(0, 1, chunk_size)]
+                   # time.sleep(chunk_size / sample_rate)
+
                 data_ai0 = np.array(data[0])
                 data_ai1 = np.array(data[1])
 
@@ -65,16 +94,31 @@ def continuous_acquisition():
                     pre_buffer_ai1.append(v1)
 
                 # 트리거 감지
-                crossings = np.where(data_ai1 >= threshold)[0]
-                if crossings.size > 0:
+                if not simulation:
+                    crossings = np.where(data_ai1 >= threshold)[0]
+                else:
+                    # 시뮬레이션 모드에서는 임의의 트리거 발생
+                    if trigger_flag:
+                        crossings = np.array([chunk_size // 2])
+                    else:
+                        crossings = np.where(data_ai1 >= threshold)[0]
+
+                if crossings.size > 0 or trigger_flag:
+                    trigger_flag = False
                     idx = crossings[0]
                     print(f"Trigger detected! Capturing 1.0s...")
-
-                    remaining = max(0, post_samples - (chunk_size - idx))
-                    raw_post = task.read(number_of_samples_per_channel=remaining)
-                    
-                    cap_ai0 = np.concatenate([list(pre_buffer_ai0), data_ai0[idx:], raw_post[0]])
-                    cap_ai1 = np.concatenate([list(pre_buffer_ai1), data_ai1[idx:], raw_post[1]])
+                    if not simulation:
+                        remaining = max(0, post_samples - (chunk_size - idx))
+                        raw_post = task.read(number_of_samples_per_channel=remaining)
+                        
+                        cap_ai0 = np.concatenate([list(pre_buffer_ai0), data_ai0[idx:], raw_post[0]])
+                        cap_ai1 = np.concatenate([list(pre_buffer_ai1), data_ai1[idx:], raw_post[1]])
+                    else:
+                       # remaining = max(0, post_samples - (chunk_size - idx))
+                       # raw_post = task.read(number_of_samples_per_channel=remaining)
+                        
+                        cap_ai0 = np.concatenate([list(pre_buffer_ai0), data_ai0[idx:]])#, raw_post[0]])
+                        cap_ai1 = np.concatenate([list(pre_buffer_ai1), data_ai1[idx:]])#, raw_post[1]])
                     
                     t = (np.arange(len(cap_ai0)) - len(pre_buffer_ai0)) / sample_rate
 
@@ -103,6 +147,8 @@ def continuous_acquisition():
                     
                     pre_buffer_ai0.clear()
                     pre_buffer_ai1.clear()
+                
+                time.sleep(0.01)
                 
         except KeyboardInterrupt:
             print("Stopped.")
