@@ -124,10 +124,24 @@ def continuous_acquisition():
 
                     # 그래프 업데이트
                     ax1.cla()
-                    ax1.plot(t, cap_ai0, label='Sensor (g)', color='blue')
-                    ax1.plot(t, cap_ai1, label='Hammer (N)', color='orange', alpha=0.7)
+                    # 센서값은 왼쪽 y축, 해머값은 오른쪽 y축
+                    line1 = ax1.plot(t, cap_ai0, label='Sensor (g)', color='blue')
+                    ax1.set_ylabel('Sensor (g)', color='blue')
+                    ax1.tick_params(axis='y', labelcolor='blue')
+                    
+                    ax1_right = ax1.twinx()
+                    line2 = ax1_right.plot(t, cap_ai1, label='Hammer (N)', color='orange', alpha=0.7)
+                    ax1_right.set_ylabel('Hammer (N)', color='orange')
+                    ax1_right.tick_params(axis='y', labelcolor='orange')
+                    
                     ax1.set_title("Impact Event Captured")
-                    ax1.legend()
+                    ax1.set_xlabel('Time (s)')
+                    
+                    # 범례 표시
+                    lines = line1 + line2
+                    labels = [l.get_label() for l in lines]
+                    ax1.legend(lines, labels, loc='upper left')
+                    
                     ax1.grid(True)
                     
                     xf_0, mag_0 = calculate_fft(cap_ai0, sample_rate)
