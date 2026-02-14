@@ -25,15 +25,16 @@ def on_key_press(event):
 
 def calculate_fft(signal, sample_rate):
     N = len(signal)
-    windowed_signal = signal * np.hanning(N)
-    yf = fft(windowed_signal)
+    #windowed_signal = signal * np.hanning(N)
+    #yf = fft(windowed_signal)
+    yf = fft(signal)
     xf = fftfreq(N, 1 / sample_rate)[:N//2]
     target_yf = np.asarray(yf[0:N//2])
     magnitude = 2.0 / N * np.abs(target_yf)
     return xf, magnitude
 
 def continuous_acquisition():
-    global trigger_flag
+    global trigger_flag, simulation
     with nidaqmx.Task() as task:
         try:
             # 가속도계 (5mV/g -> 5.0)
@@ -48,7 +49,7 @@ def continuous_acquisition():
             task.timing.cfg_samp_clk_timing(rate=sample_rate, samps_per_chan=chunk_size,
                                             sample_mode=AcquisitionType.CONTINUOUS)
         except Exception as e:
-           # simulation = True
+            simulation = True
             print("Hardware configuration failed. Switching to simulation mode.")
             
 
@@ -84,9 +85,26 @@ def continuous_acquisition():
                 if not simulation:
                     data = task.read(number_of_samples_per_channel=chunk_size)
                 else:
-                    # 시뮬레이션 모드에서는 임의의 데이터 생성
-                    data = [np.random.normal(0, 1, chunk_size), np.random.normal(0, 1, chunk_size)]
-                   # time.sleep(chunk_size / sample_rate)
+                    # 시뮬레이션 모드에서는 10Hz, 15Hz, 100Hz 정현파를 혼합한 신호 생성
+                    t_chunk = np.arange(chunk_size) / sample_rate
+                    # 센서 채널 (g 단위): 작은 진폭의 혼합 사인파 + 약한 랜덤 노이즈
+                    sensor_signal = (
+                        1 * np.sin(2 * np.pi * 10 * t_chunk)
+                        + 1 * np.sin(2 * np.pi * 200 * t_chunk)
+                        + 1 * np.sin(2 * np.pi * 300 * t_chunk)
+                    )
+                    sensor_signal += 0.02 * np.random.normal(0, 1, chunk_size)
+
+                    # 해머 채널 (N 단위): 동일 주파수 성분을 포함하되 진폭을 키워 임계값을 넘기기 쉽게 함
+                    hammer_signal = 0 * (
+                        0.6 * np.sin(2 * np.pi * 10 * t_chunk)
+                        + 0.3 * np.sin(2 * np.pi * 15 * t_chunk)
+                        + 0.1 * np.sin(2 * np.pi * 100 * t_chunk)
+                    )
+                    hammer_signal += 0.5 * np.random.normal(0, 1, chunk_size)
+
+                    data = [sensor_signal, hammer_signal]
+                    # time.sleep(chunk_size / sample_rate)
 
                 data_ai0 = np.array(data[0])
                 data_ai1 = np.array(data[1])
@@ -116,11 +134,44 @@ def continuous_acquisition():
                         cap_ai0 = np.concatenate([list(pre_buffer_ai0), data_ai0[idx:], raw_post[0]])
                         cap_ai1 = np.concatenate([list(pre_buffer_ai1), data_ai1[idx:], raw_post[1]])
                     else:
-                       # remaining = max(0, post_samples - (chunk_size - idx))
-                       # raw_post = task.read(number_of_samples_per_channel=remaining)
-                        
-                        cap_ai0 = np.concatenate([list(pre_buffer_ai0), data_ai0[idx:]])#, raw_post[0]])
-                        cap_ai1 = np.concatenate([list(pre_buffer_ai1), data_ai1[idx:]])#, raw_post[1]])
+                        # For simulation mode, synthesize a full 1.0s capture (pre + post)
+                        total_len = pre_samples + post_samples
+
+                        # tail from current chunk starting at trigger index
+                        tail = data_ai0[idx:]
+                        tail_h = data_ai1[idx:]
+
+                        # how many additional samples we need after taking pre_buffer and tail
+                        current_len = len(pre_buffer_ai0) + len(tail)
+                        need = max(0, total_len - current_len)
+
+                        # generate the remaining post samples
+                        if need > 0:
+                            t_post = np.arange(need) / sample_rate
+                            post_sensor = (
+                                1 * np.sin(2 * np.pi * 10 * t_post)
+                                + 1 * np.sin(2 * np.pi * 200 * t_post)
+                                + 1 * np.sin(2 * np.pi * 300 * t_post)
+                            )
+                            post_sensor = post_sensor + 0.02 * np.random.normal(0, 1, need)
+
+                            post_hammer = 0.5 * np.random.normal(0, 1, need)
+                        else:
+                            post_sensor = np.array([])
+                            post_hammer = np.array([])
+
+                        cap_ai0 = np.concatenate([list(pre_buffer_ai0), tail, post_sensor])
+                        cap_ai1 = np.concatenate([list(pre_buffer_ai1), tail_h, post_hammer])
+
+                        # ensure exact length (trim or pad with small noise)
+                        expected = total_len
+                        if len(cap_ai0) > expected:
+                            cap_ai0 = cap_ai0[:expected]
+                            cap_ai1 = cap_ai1[:expected]
+                        elif len(cap_ai0) < expected:
+                            pad = expected - len(cap_ai0)
+                            cap_ai0 = np.concatenate([cap_ai0, 0.02 * np.random.normal(0, 1, pad)])
+                            cap_ai1 = np.concatenate([cap_ai1, 0.5 * np.random.normal(0, 1, pad)])
                     
                     t = (np.arange(len(cap_ai0)) - len(pre_buffer_ai0)) / sample_rate
 
