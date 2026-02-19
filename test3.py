@@ -37,9 +37,9 @@ last_fft_data = None     # (xf_0, mag_0)
 
 def calculate_fft(signal, sample_rate):
     N = len(signal)
-    #windowed_signal = signal * np.hanning(N)
-    #yf = fft(windowed_signal)
-    yf = fft(signal)
+    windowed_signal = signal * np.hanning(N)
+    yf = fft(windowed_signal)
+    #yf = fft(signal)
     xf = fftfreq(N, 1 / sample_rate)[:N//2]
     target_yf = np.asarray(yf[0:N//2])
     magnitude = 2.0 / N * np.abs(target_yf)
