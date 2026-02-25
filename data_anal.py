@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import filedialog
 import os
 import numpy as np
-from scipy.fft import rfft, rfftfreq
+from scipy.fft import rfft
 
 def plot_with_enhanced_labels():
     # 1. 파일 선택
@@ -14,9 +14,14 @@ def plot_with_enhanced_labels():
     if not file_path: return
 
     try:
-        # 2. 데이터 로드 및 FFT 진폭 계산 (기존 로직 유지)
+        # 2. 데이터 로드 및 시간축 리셋
         df = pd.read_csv(file_path)
         t, dist = df['Time(s)'].values, df['Distance(mm)'].values
+        
+        # --- [시간축 0으로 리셋] ---
+        t = t - t[0] 
+        # ------------------------
+
         fs = 1 / (t[1] - t[0])
 
         window_size = int(fs * 0.2)
@@ -29,6 +34,7 @@ def plot_with_enhanced_labels():
             yf = rfft(window_data)
             amp = (np.max(np.abs(yf)) * 2 / window_size) * acf
             fft_amplitudes.append(amp)
+            # 리셋된 t 값을 기준으로 시간 설정
             fft_times.append(t[i + window_size // 2])
 
         fft_times = np.array(fft_times)
@@ -36,7 +42,6 @@ def plot_with_enhanced_labels():
         threshold = 1.0 
 
         # 3. 교차점 정밀 계산
-        # 부호가 바뀌는 지점 찾기
         cross_indices = np.where(np.diff(np.sign(fft_amplitudes - threshold)))[0]
         
         # 4. 시각화
@@ -56,19 +61,13 @@ def plot_with_enhanced_labels():
                 ax.plot(fft_times, fft_amplitudes, color='forestgreen', linewidth=2, label='FFT Peak Amplitude')
                 ax.fill_between(fft_times, fft_amplitudes, color='green', alpha=0.1)
 
-            # 1mm 기준선
             ax.axhline(y=threshold, color='red', linestyle='--', linewidth=1.5, label='Threshold 1.0mm')
             
-            # 교차점 표시 및 라벨링 (화살표 추가)
             for i, idx in enumerate(cross_indices):
                 ct = fft_times[idx]
-                
-                # 교차점 강조 (노란색 점)
                 ax.plot(ct, threshold, 'o', markerfacecolor='yellow', markeredgecolor='black', markersize=6, zorder=5)
                 
-                # 텍스트가 겹치지 않게 위아래 번갈아 배치
                 y_offset = 0.5 if i % 2 == 0 else -0.8
-                
                 ax.annotate(f'{ct:.2f}s', 
                             xy=(ct, threshold), 
                             xytext=(ct, threshold + y_offset),
@@ -81,8 +80,8 @@ def plot_with_enhanced_labels():
             ax.legend(loc='upper right', fontsize='small')
             set_refined_grid(ax)
 
-        ax2.set_xlabel("Time (s)")
-        ax1.set_title(f"Refined Threshold Crossing Analysis\nFile: {os.path.basename(file_path)}")
+        ax2.set_xlabel("Time (s) [Reset to 0]") # 라벨에 리셋 표시 추가
+        ax1.set_title(f"Refined Threshold Crossing Analysis (Time Reset)\nFile: {os.path.basename(file_path)}")
         
         plt.tight_layout()
         plt.show()
