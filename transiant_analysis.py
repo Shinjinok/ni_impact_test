@@ -3,9 +3,12 @@ import numpy as np
 import nidaqmx
 from nidaqmx.constants import AcquisitionType
 import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QPushButton, QWidget, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QPushButton, QWidget, QHBoxLayout, QMessageBox
 from PyQt5.QtCore import QTimer
 import pyqtgraph as pg
+from scipy.fft import fft, fftfreq, rfft, rfftfreq
+import pandas as pd
+from datetime import datetime
 
 class DAQGui(QMainWindow):
     def __init__(self):
@@ -16,10 +19,9 @@ class DAQGui(QMainWindow):
         self.AI_CH = f"{self.DEV}/ai0"
         self.FS = 1000
         self.BUFFER_SIZE = 50
-        self.MIDDLE_REF = 68
+        self.MIDDLE_REF = 68 
         
-        # 5초 데이터를 표시하기 위해 버퍼를 넉넉히 7초 확보
-        self.full_buffer = np.zeros(self.FS * 7)
+        self.full_buffer = np.zeros(self.FS * 12)
         
         self.is_monitoring = False
         self.is_ready_mode = False
@@ -30,31 +32,85 @@ class DAQGui(QMainWindow):
         self.timer.timeout.connect(self.process_data)
         
     def init_ui(self):
-        self.setWindowTitle("Baumer DAQ - 0.5s Pre-Trigger & 5s View")
-        self.setGeometry(100, 100, 900, 600)
+        self.setWindowTitle("Baumer DAQ - Zero Set & CSV Save")
+        self.setGeometry(100, 100, 1000, 900)
         
         layout = QVBoxLayout()
         central_widget = QWidget()
         central_widget.setLayout(layout)
         self.setCentralWidget(central_widget)
         
-        self.graph_widget = pg.PlotWidget()
-        self.graph_widget.setBackground('w')
-        self.graph_widget.setYRange(-60, 60)
-        self.curve = self.graph_widget.plot(pen=pg.mkPen('b', width=1))
-        layout.addWidget(self.graph_widget)
+        # --- 그래프 영역 (기존과 동일) ---
+        self.graph_time = pg.PlotWidget(title="Time Domain (Last 1s)")
+        self.graph_time.setBackground('w')
+        self.graph_time.setYRange(-30, 30)
+        self.curve_time = self.graph_time.plot(pen=pg.mkPen('b', width=1))
+        layout.addWidget(self.graph_time)
         
+        self.graph_fft = pg.PlotWidget(title="Frequency Domain (Real-time)")
+        self.graph_fft.setBackground('w')
+        self.graph_fft.setXRange(0, 20) 
+        self.curve_fft = self.graph_fft.plot(pen=pg.mkPen('r', width=2))
+        self.peak_label = pg.TextItem(anchor=(0, 1), color='k', fill=(255, 255, 255, 200))
+        self.graph_fft.addItem(self.peak_label)
+        layout.addWidget(self.graph_fft)
+        
+        # --- 버튼 레이아웃 ---
         btn_layout = QHBoxLayout()
+        
         self.btn_monitor = QPushButton("연속표시 시작")
         self.btn_monitor.setFixedHeight(50)
         self.btn_monitor.clicked.connect(self.toggle_monitor)
         btn_layout.addWidget(self.btn_monitor)
         
-        self.btn_ready = QPushButton("READY (Wait 5mm Move)")
+        self.btn_zero = QPushButton("Zero Set")
+        self.btn_zero.setFixedHeight(50)
+        self.btn_zero.clicked.connect(self.set_zero)
+        btn_layout.addWidget(self.btn_zero)
+        
+        self.btn_ready = QPushButton("READY (Wait 5mm)")
         self.btn_ready.setFixedHeight(50)
         self.btn_ready.clicked.connect(self.activate_ready)
         btn_layout.addWidget(self.btn_ready)
+
+        # ★ CSV 저장 버튼 추가 ★
+        self.btn_csv = QPushButton("CSV 데이터 저장")
+        self.btn_csv.setFixedHeight(50)
+        self.btn_csv.setStyleSheet("background-color: #dcf8c6; font-weight: bold;")
+        self.btn_csv.clicked.connect(self.save_to_csv)
+        btn_layout.addWidget(self.btn_csv)
+        
         layout.addLayout(btn_layout)
+
+    def save_to_csv(self):
+        """현재 버퍼에 쌓인 Raw 데이터를 CSV로 저장"""
+        try:
+            # 파일명 생성 (예: daq_data_20240520_143005.csv)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"daq_raw_data_{timestamp}.csv"
+            
+            # 시간 축 생성 (현재 12초 버퍼 기준)
+            time_axis = np.linspace(0, len(self.full_buffer)/self.FS, len(self.full_buffer))
+            
+            # DataFrame 생성 및 저장
+            df = pd.DataFrame({
+                'Time(s)': time_axis,
+                'Distance(mm)': self.full_buffer
+            })
+            
+            df.to_csv(filename, index=False)
+            QMessageBox.information(self, "저장 완료", f"데이터가 성공적으로 저장되었습니다.\n파일명: {filename}")
+            print(f"Data saved to {filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "저장 실패", f"에러 발생: {e}")
+
+    # --- 이하 기존 메서드 (동일) ---
+    def set_zero(self):
+        if self.is_monitoring:
+            current_raw_avg = np.mean(self.full_buffer[-500:]) + self.MIDDLE_REF
+            self.MIDDLE_REF = current_raw_avg
+            print(f"영점 조절 완료: {self.MIDDLE_REF:.2f}")
 
     def activate_ready(self):
         if not hasattr(self, 'task'): self.start_task()
@@ -66,18 +122,22 @@ class DAQGui(QMainWindow):
         self.timer.start(10)
 
     def start_task(self):
-        self.task = nidaqmx.Task()
-        self.task.ai_channels.add_ai_voltage_chan(self.AI_CH)
-        self.task.timing.cfg_samp_clk_timing(rate=self.FS, sample_mode=AcquisitionType.CONTINUOUS)
-        self.task.start()
+        try:
+            self.task = nidaqmx.Task()
+            self.task.ai_channels.add_ai_voltage_chan(self.AI_CH)
+            self.task.timing.cfg_samp_clk_timing(rate=self.FS, sample_mode=AcquisitionType.CONTINUOUS)
+            self.task.start()
+        except Exception as e: print(f"DAQ Start Error: {e}")
 
     def stop_all(self):
         self.timer.stop()
         self.is_monitoring = False
         self.is_ready_mode = False
         if hasattr(self, 'task'):
-            self.task.stop()
-            self.task.close()
+            try:
+                self.task.stop()
+                self.task.close()
+            except: pass
             del self.task
         self.btn_monitor.setText("연속표시 시작")
         self.btn_ready.setText("READY (Wait 5mm Move)")
@@ -99,62 +159,61 @@ class DAQGui(QMainWindow):
             
             self.full_buffer = np.roll(self.full_buffer, -self.BUFFER_SIZE)
             self.full_buffer[-self.BUFFER_SIZE:] = new_samples
-            self.curve.setData(self.full_buffer[-(self.FS*1):])
+            
+            self.curve_time.setData(self.full_buffer[-self.FS:])
+            self.update_fft(self.full_buffer[-self.FS*10:])
             
             if self.is_ready_mode:
                 if self.start_pos is None:
                     self.start_pos = np.mean(new_samples)
                     return
-
                 displacements = np.abs(new_samples - self.start_pos)
-                
                 if np.any(displacements >= 5.0):
-                    print("트리거 감지! 과거 0.5초 포함 5초 수집 시작.")
                     self.is_ready_mode = False
                     self.handle_trigger()
                     
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Process Error: {e}")
             self.stop_all()
+
+    def update_fft(self, data):
+        n = len(data)
+        detrended_data = data - np.mean(data)
+        yf = fft(detrended_data)
+        xf = fftfreq(n, 1 / self.FS)
+        pos_mask = (xf >= 0) & (xf <= 25)
+        self.curve_fft.setData(xf[pos_mask], (2.0 / n) * np.abs(yf[pos_mask]))
 
     def handle_trigger(self):
-        # 트리거 시점에 이미 버퍼에 과거 데이터가 있으므로, 
-        # 남은 4.5초를 더 수집한 뒤 그래프를 출력합니다.
-        remaining_time_ms = 4500 
-        self.btn_ready.setText("데이터 수집 중 (5.0s)...")
+        self.btn_ready.setText("데이터 수집 중...")
         self.btn_ready.setStyleSheet("background-color: #ff4500; color: white;")
-        
-        QTimer.singleShot(remaining_time_ms, self.show_plot)
+        QTimer.singleShot(4500, self.show_plot)
 
     def show_plot(self):
+        # (기존의 FFT 진폭 추출 그래프 코드와 동일)
         try:
-            # 5초 분량의 데이터 추출 (5000 샘플)
-            # 현재 시점이 수집 종료 시점이므로 마지막 5000개를 가져옵니다.
             final_data = self.full_buffer[-(self.FS * 5):]
             self.stop_all()
+            t = np.linspace(-0.5, 4.5, len(final_data))
             
-            plt.figure(figsize=(12, 6))
-            # 트리거 시점은 시작으로부터 0.5초 지점입니다.
-            t = np.linspace(-0.5, 4.5, len(final_data)) 
-            plt.plot(t, final_data, 'b-', label='Captured Data (Pre 0.5s ~ Post 4.5s)')
+            window_size = int(self.FS * 0.2)
+            step_size = int(self.FS * 0.05)
             
-            # 트리거 발생 시점(0초) 표시
-            plt.axvline(0, color='r', linestyle='--', alpha=0.7, label='Trigger Point')
-            
-            # Y축 자동 스케일 및 여유 공간 설정
-            d_min, d_max = np.min(final_data), np.max(final_data)
-            pad = (d_max - d_min) * 0.1 if d_max != d_min else 1.0
-            plt.ylim(d_min - pad, d_max + pad)
-            
-            plt.title("Displacement Trigger (0.5s Pre-recorded, 5s Total)")
-            plt.xlabel("Time (s) [0 = Trigger Time]")
-            plt.ylabel("Distance (mm)")
-            plt.legend(loc='upper right')
-            plt.grid(True)
+            fft_times, fft_amplitudes = [], []
+            for i in range(0, len(final_data) - window_size, step_size):
+                window_data = (final_data[i : i + window_size] - np.mean(final_data[i : i + window_size])) * np.hanning(window_size)
+                yf = rfft(window_data)
+                fft_amplitudes.append(np.max(np.abs(yf)) * 2 / window_size)
+                fft_times.append(t[i + window_size // 2])
+
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+            ax1.plot(t, final_data, label='Raw Distance')
+            ax1.set_title("Triggered Data")
+            ax2.plot(fft_times, fft_amplitudes, color='g', label='FFT Amplitude')
+            ax2.set_title("Time-Amplitude (FFT)")
+            plt.tight_layout()
             plt.show()
-            
-        except Exception as e:
-            print(f"Plot Error: {e}")
+        except Exception as e: print(f"Plot Error: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
